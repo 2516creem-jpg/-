@@ -1,4 +1,4 @@
-import cv2
+﻿import cv2
 import mediapipe as mp
 import math
 import os
@@ -63,7 +63,7 @@ prev_fh_L = 0
 prev_fh_R = 0
 
 # --- 2. ระบุไฟล์ VDO ---
-video_path = "D:/Python Program/walk_vdo.mp4" 
+video_path = "D:\Desktop\Program\Gait/walk_vdo.mp4" 
 
 if not os.path.exists(video_path):
     print(f"❌ Error: หาไฟล์ไม่เจอที่ -> {video_path}")
@@ -355,4 +355,3 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
-
