@@ -1,13 +1,10 @@
 ﻿import cv2
+import mediapipe as mp
+import math
+import os
 import numpy as np
 import streamlit as st
 import tempfile
-import time
-import math
-
-import mediapipe as mp
-from mediapipe.tasks.python import vision
-from mediapipe.tasks.python import BaseOptions
 
 # ===============================
 # Streamlit UI
@@ -31,92 +28,101 @@ tfile.write(uploaded_file.read())
 video_path = tfile.name
 
 # ===============================
-# Load MediaPipe PoseLandmarker
+# MediaPipe setup
 # ===============================
-@st.cache_resource
-def load_pose_model():
-    base_options = BaseOptions(
-        model_asset_path="pose_landmarker_heavy.task"
-    )
-
-    options = vision.PoseLandmarkerOptions(
-        base_options=base_options,
-        running_mode=vision.RunningMode.VIDEO,
-        num_poses=1,
-        min_pose_detection_confidence=0.5,
-        min_pose_presence_confidence=0.5,
-        min_tracking_confidence=0.5,
-    )
-
-    return vision.PoseLandmarker.create_from_options(options)
-
-pose_landmarker = load_pose_model()
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
 
 # ===============================
-# OpenCV Video
+# Helper functions
+# ===============================
+def calculate_angle(a, b, c):
+    a = np.array(a)
+    b = np.array(b)
+    c = np.array(c)
+    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - \
+              np.arctan2(a[1]-b[1], a[0]-b[0])
+    angle = np.abs(radians * 180.0 / np.pi)
+    if angle > 180:
+        angle = 360 - angle
+    return angle
+
+# ===============================
+# Calibration
+# ===============================
+pixels_per_cm = 5.0
+
+peaks_shoulder, peaks_foot, peaks_knee, peaks_fh = [], [], [], []
+temp_max_shoulder = temp_max_foot = temp_max_knee = 0
+temp_max_fh_L = temp_max_fh_R = -100
+avg_max_shoulder = avg_max_foot = avg_max_knee = avg_max_fh = 0
+prev_shoulder = prev_foot = prev_knee = prev_fh_L = prev_fh_R = 0
+
+# ===============================
+# Video
 # ===============================
 cap = cv2.VideoCapture(video_path)
-fps = cap.get(cv2.CAP_PROP_FPS)
+frame_area = st.empty()
+info_area = st.empty()
 
-FRAME_WINDOW = st.image([], channels="BGR")
-
-# ===============================
-# Drawing utilities (เหมือนเดิม)
-# ===============================
-mp_drawing = mp.solutions.drawing_utils
-mp_pose_style = mp.solutions.drawing_styles
-mp_pose_connections = mp.solutions.pose.POSE_CONNECTIONS
-
-timestamp_ms = 0
-
-# ===============================
-# Video loop
-# ===============================
 while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
+    success, image = cap.read()
+    if not success:
         break
 
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = pose.process(image_rgb)
+    image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    h, w, _ = image.shape
 
-    # MediaPipe ต้องการ timestamp (ms)
-    timestamp_ms += int(1000 / fps)
+    if results.pose_landmarks:
+        lm = results.pose_landmarks.landmark
 
-    mp_image = mp.Image(
-        image_format=mp.ImageFormat.SRGB,
-        data=frame_rgb
-    )
+        # Shoulder
+        x1, y1 = int(lm[11].x*w), int(lm[11].y*h)
+        x2, y2 = int(lm[23].x*w), int(lm[23].y*h)
+        dist_sh = abs(x2-x1)
 
-    result = pose_landmarker.detect_for_video(
-        mp_image,
-        timestamp_ms
-    )
+        if dist_sh < prev_shoulder-2 and temp_max_shoulder > 5:
+            peaks_shoulder.append(temp_max_shoulder/pixels_per_cm)
+            peaks_shoulder = sorted(peaks_shoulder, reverse=True)[:5]
+            avg_max_shoulder = sum(peaks_shoulder)/len(peaks_shoulder)
+            temp_max_shoulder = 0
+
+        temp_max_shoulder = max(temp_max_shoulder, dist_sh)
+        prev_shoulder = dist_sh
+
+        # Knee
+        k1 = [lm[23].x*w, lm[23].y*h]
+        k2 = [lm[25].x*w, lm[25].y*h]
+        k3 = [lm[27].x*w, lm[27].y*h]
+        angle = calculate_angle(k1, k2, k3)
+
+        if angle < prev_knee-2 and temp_max_knee > 50:
+            peaks_knee.append(temp_max_knee)
+            peaks_knee = sorted(peaks_knee, reverse=True)[:5]
+            avg_max_knee = sum(peaks_knee)/len(peaks_knee)
+            temp_max_knee = 0
+
+        temp_max_knee = max(temp_max_knee, angle)
+        prev_knee = angle
+
+        cv2.putText(image, f"Knee: {int(angle)}",
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (0, 255, 0), 2)
 
     # ===============================
-    # Draw landmarks (เหมือน mediapipe เดิม)
+    # Show on Streamlit
     # ===============================
-    if result.pose_landmarks:
-        for pose_landmarks in result.pose_landmarks:
-            landmark_list = mp.framework.formats.landmark_pb2.NormalizedLandmarkList(
-                landmark=[
-                    mp.framework.formats.landmark_pb2.NormalizedLandmark(
-                        x=l.x,
-                        y=l.y,
-                        z=l.z,
-                        visibility=l.visibility
-                    )
-                    for l in pose_landmarks
-                ]
-            )
+    frame_area.image(image, channels="BGR")
 
-            mp_drawing.draw_landmarks(
-                frame,
-                landmark_list,
-                mp_pose_connections,
-                landmark_drawing_spec=mp_pose_style.get_default_pose_landmarks_style()
-            )
-
-    FRAME_WINDOW.image(frame, channels="BGR")
-    time.sleep(1 / fps)
+    info_area.markdown(f"""
+    **AVG Shoulder (cm):** {avg_max_shoulder:.2f}  
+    **AVG Knee (deg):** {avg_max_knee:.1f}  
+    """)
 
 cap.release()
+st.success("✅ ประมวลผลเสร็จแล้ว")
